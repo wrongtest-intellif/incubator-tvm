@@ -33,11 +33,13 @@ use std::{
     ptr, slice, str,
     sync::Mutex,
 };
-
+use std::convert::{TryFrom};
 use anyhow::Result;
 use lazy_static::lazy_static;
 
 pub use tvm_sys::{ffi, ArgValue, RetValue};
+
+use crate::errors::Error;
 
 use super::to_boxed_fn::ToBoxedFn;
 use super::to_function::{ToFunction, Typed};
@@ -180,6 +182,51 @@ impl Drop for Function {
     }
 }
 
+impl From<Function> for RetValue {
+    fn from(func: Function) -> RetValue {
+        RetValue::FuncHandle(func.handle)
+    }
+}
+
+impl TryFrom<RetValue> for Function {
+    type Error = Error;
+
+    fn try_from(ret_value: RetValue) -> Result<Function, Self::Error> {
+        match ret_value {
+            RetValue::FuncHandle(handle) => Ok(Function::new(handle)),
+            _ => Err(Error::downcast(format!("{:?}", ret_value), "FunctionHandle"))
+        }
+    }
+}
+
+impl<'a> From<Function> for ArgValue<'a> {
+    fn from(func: Function) -> ArgValue<'a> {
+        ArgValue::FuncHandle(func.handle)
+    }
+}
+
+impl<'a> TryFrom<ArgValue<'a>> for Function {
+    type Error = Error;
+
+    fn try_from(arg_value: ArgValue<'a>) -> Result<Function, Self::Error> {
+        match arg_value {
+            ArgValue::FuncHandle(handle) => Ok(Function::new(handle)),
+            _ => Err(Error::downcast(format!("{:?}", arg_value), "FunctionHandle")),
+        }
+    }
+}
+
+impl<'a> TryFrom<&ArgValue<'a>> for Function {
+    type Error = Error;
+
+    fn try_from(arg_value: &ArgValue<'a>) -> Result<Function, Self::Error> {
+        match arg_value {
+            ArgValue::FuncHandle(handle) => Ok(Function::new(*handle)),
+            _ => Err(Error::downcast(format!("{:?}", arg_value), "FunctionHandle")),
+        }
+    }
+}
+
 /// Registers a Rust function with an arbitrary type signature in
 /// the TVM registry.
 ///
@@ -240,8 +287,8 @@ where
 }
 
 #[macro_export]
-macro_rules! external_func {
-    (fn $name:ident ( $($arg:ident : $ty:ty),* ) -> $ret_type:ty as $ext_name:literal;) => {
+macro_rules! external_func_impl {
+    ($name:ident , $($ty_param:tt)* , ( $($arg:ident : $ty:ty),* ), $ret_type:ty, $ext_name:literal) => {
         ::paste::item! {
             #[allow(non_upper_case_globals)]
             static [<global_ $name>]: ::once_cell::sync::Lazy<&'static $crate::Function> =
@@ -251,12 +298,23 @@ macro_rules! external_func {
             });
         }
 
-        pub fn $name($($arg : $ty),*) -> Result<$ret_type, anyhow::Error> {
+        pub fn $name<$($ty_param),*>($($arg : $ty),*) -> anyhow::Result<$ret_type> w,* {
             let func_ref: &$crate::Function = ::paste::expr! { &*[<global_ $name>] };
             let func_ref: Box<dyn Fn($($ty),*) -> anyhow::Result<$ret_type>> = func_ref.to_boxed_fn();
             let res: $ret_type = func_ref($($arg),*)?;
             Ok(res)
         }
+    }
+}
+
+
+#[macro_export]
+macro_rules! external_func {
+    (fn $name:ident ( $($arg:ident : $ty:ty),* ) -> $ret_type:ty as $ext_name:literal;) => {
+        $crate::external_func_impl!($name, , ( $($arg : $ty),* ) , $ret_type, $ext_name);
+    };
+    (fn $name:ident < $($ty_param:ident),* > ( $($arg:ident : $ty:ty),* ) -> $ret_type:ty as $ext_name:literal;) => {
+        $crate::external_func_impl!($name, $($ty_param:ident),* , ( $($arg : $ty),* ) , $ret_type, $ext_name);
     }
 }
 

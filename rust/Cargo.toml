@@ -29,5 +29,6 @@ members = [
 	"frontend/tests/callback",
 	"frontend/examples/resnet",
     "tvm-sys",
-	"tvm-rt"
+	"tvm-rt",
+	"tvm",
 ]

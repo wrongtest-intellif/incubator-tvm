@@ -1,10 +1,13 @@
-use crate::runtime::function::Builder;
-use crate::runtime::object::{ObjectRef, ToObjectRef};
-use std::convert::{TryFrom, TryInto};
+use std::convert::{TryFrom};
 use std::marker::PhantomData;
-use tvm_sys::TVMRetValue;
+
+use crate::runtime::object::{ObjectRef, ToObjectRef};
+
+use tvm_rt::RetValue;
+use tvm_rt::external_func;
 
 use anyhow::Result;
+
 
 #[derive(Clone)]
 pub struct Array<T: ToObjectRef> {
@@ -12,35 +15,41 @@ pub struct Array<T: ToObjectRef> {
     _data: PhantomData<T>,
 }
 
+external_func! {
+    fn array_get_item(array: ObjectRef, index: isize) -> ObjectRef as "ir.DebugPrint";
+}
+
 impl<T: ToObjectRef> Array<T> {
     pub fn from_vec(data: Vec<T>) -> Result<Array<T>> {
-        let iter = data.iter().map(|element| element.to_object_ref());
+        unimplemented!()
+        // let iter = data.iter().map(|element| element.to_object_ref());
 
-        let array_data = Builder::default()
-            .get_function("node.Array")
-            .args(iter)
-            .invoke()?
-            .try_into()?;
+        // let array_data = Builder::default()
+        //     .get_function("node.Array")
+        //     .args(iter)
+        //     .invoke()?
+        //     .try_into()?;
 
-        Ok(Array {
-            object: array_data,
-            _data: PhantomData,
-        })
+        // Ok(Array {
+        //     object: array_data,
+        //     _data: PhantomData,
+        // })
     }
 
     pub fn get(&self, index: isize) -> Result<T>
     where
-        T: TryFrom<TVMRetValue, Error = anyhow::Error>,
+        T: TryFrom<RetValue, Error = anyhow::Error>,
     {
-        // TODO(@jroesch): why do we used a signed index here?
-        let element: T = Builder::default()
-            .get_function("node.ArrayGetItem")
-            .arg(self.object.clone())
-            .arg(index)
-            .invoke()?
-            .try_into()?;
+        unimplemented!()
+        // // TODO(@jroesch): why do we used a signed index here?
+        // let element: T = Builder::default()
+        //     .get_function("node.ArrayGetItem")
+        //     .arg(self.object.clone())
+        //     .arg(index)
+        //     .invoke()?
+        //     .try_into()?;
 
-        Ok(element)
+        // Ok(element)
     }
 }
 // mod array_api {

@@ -31,21 +31,13 @@
 //! Checkout the `examples` repository for more details.
 
 pub use crate::{
-    context::{TVMContext, TVMDeviceType},
     errors::*,
     function::Function,
     module::Module,
     ndarray::NDArray,
 };
 
-// TODO: refactor
-pub use tvm_sys::{
-    errors as common_errors,
-    ffi::{self, DLDataType, TVMByteArray},
-    packed_func::{TVMArgValue, TVMRetValue},
-};
-
-pub type DataType = DLDataType;
+pub use tvm_rt::{Context, DeviceType, DataType};
 
 pub use tvm_rt::context;
 pub use tvm_rt::errors;

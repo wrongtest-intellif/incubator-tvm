@@ -17,11 +17,8 @@
  * under the License.
  */
 
+use crate::DataType;
 use thiserror::Error;
-
-#[derive(Debug, Error)]
-#[error("Cannot convert from an empty array.")]
-pub struct EmptyArrayError;
 
 #[derive(Debug, Error)]
 #[error("Handle `{name}` is null.")]
@@ -41,5 +38,32 @@ pub struct TypeMismatchError {
 }
 
 #[derive(Debug, Error)]
-#[error("Missing NDArray shape.")]
-pub struct MissingShapeError;
+pub enum NDArrayError {
+    #[error("Missing NDArray shape.")]
+    MissingShape,
+    #[error("Cannot convert from an empty array.")]
+    EmptyArray,
+    #[error("Invalid datatype when attempting to convert ndarray.")]
+    InvalidDatatype(#[from] tvm_sys::datatype::ParseDataTypeError),
+    #[error("a shape error occurred in the Rust ndarray library")]
+    ShapeError(#[from] ndarray::ShapeError),
+    #[error("Expected type `{expected}` but found `{actual}`")]
+    DataTypeMismatch { expected: DataType, actual: DataType }
+}
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("{0}")]
+    Downcast(#[from] tvm_sys::errors::ValueDowncastError),
+    #[error("raw pointer passed across boundary was null")]
+    Null,
+}
+
+impl Error {
+    pub fn downcast(actual_type: String, expected_type: &'static str) -> Error {
+        Self::Downcast(tvm_sys::errors::ValueDowncastError {
+            actual_type,
+            expected_type,
+        })
+    }
+}

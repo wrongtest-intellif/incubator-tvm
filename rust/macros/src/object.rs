@@ -89,12 +89,12 @@ pub fn macro_impl(input: proc_macro::TokenStream) -> TokenStream {
         }
 
         impl std::convert::TryFrom<tvm_rt::RetValue> for #ref_id {
-            type Error = ::anyhow::Error;
+            type Error = tvm_rt::Error;
 
             fn try_from(ret_val: tvm_rt::RetValue) -> Result<#ref_id, Self::Error> {
                 use std::convert::TryInto;
                 let oref: ObjectRef = ret_val.try_into()?;
-                let ptr = oref.0.ok_or(anyhow::anyhow!("null ptr"))?;
+                let ptr = oref.0.ok_or(tvm_rt::Error::Null)?;
                 let ptr = ptr.downcast::<#payload_id>()?;
                 Ok(#ref_id(Some(ptr)))
             }
@@ -122,7 +122,7 @@ pub fn macro_impl(input: proc_macro::TokenStream) -> TokenStream {
         }
 
         impl<'a> std::convert::TryFrom<tvm_rt::ArgValue<'a>> for #ref_id {
-            type Error = anyhow::Error;
+            type Error = tvm_rt::Error;
 
             fn try_from(arg_value: tvm_rt::ArgValue<'a>) -> Result<#ref_id, Self::Error> {
                 use std::convert::TryInto;
@@ -132,7 +132,7 @@ pub fn macro_impl(input: proc_macro::TokenStream) -> TokenStream {
         }
 
         impl<'a> std::convert::TryFrom<&tvm_rt::ArgValue<'a>> for #ref_id {
-            type Error = anyhow::Error;
+            type Error = tvm_rt::Error;
 
             fn try_from(arg_value: &tvm_rt::ArgValue<'a>) -> Result<#ref_id, Self::Error> {
                 use std::convert::TryInto;

@@ -37,5 +37,5 @@ impl PassInfo {
 }
 
 external_func! {
-    fn create_func_pass(func: &Function, pass_info: PassInfo) -> Pass as "relay._transform.MakeFunctionPass";
+    fn create_func_pass(func: Function, pass_info: PassInfo) -> Pass as "relay._transform.MakeFunctionPass";
 }

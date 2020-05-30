@@ -44,8 +44,6 @@ use std::{
     str,
 };
 
-use anyhow::Error;
-
 pub use crate::{
     context::{Context, DeviceType},
     errors::*,
@@ -57,7 +55,6 @@ pub use crate::{
 pub use function::{ArgValue, RetValue};
 pub use tvm_sys::byte_array::ByteArray;
 pub use tvm_sys::datatype::DataType;
-
 use tvm_sys::ffi;
 
 // Macro to check the return call to TVM runtime shared library.
@@ -80,7 +77,7 @@ pub fn get_last_error() -> &'static str {
     }
 }
 
-pub(crate) fn set_last_error(err: &Error) {
+pub(crate) fn set_last_error<E: std::error::Error>(err: &E) {
     let c_string = CString::new(err.to_string()).unwrap();
     unsafe {
         ffi::TVMAPISetLastError(c_string.as_ptr());
