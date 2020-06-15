@@ -521,26 +521,25 @@ inline Array<Tensor> split(const Tensor& x, Array<Integer> split_indices, int ax
  * \param end Indicies indicating end of the slice
  * \param strides Specifies the stride values, it can be negative
  * in that case, the input tensor will be reversed in that particular axis
+ * \param slice_mode Specifies the slice mode
  * \param name The name of the operation
  * \param tag The tag to mark the operation
  *
  * \return A Tensor whose op member is the split operation
  */
 inline Tensor strided_slice(const Tensor& x, const Array<Integer>& begin, const Array<Integer>& end,
-                            const Array<Integer>& strides, std::string name = "T_strided_slice",
-                            std::string tag = kInjective) {
+                            const Array<Integer>& strides, std::string slice_mode = "end",
+                            std::string name = "T_strided_slice", std::string tag = kInjective) {
   size_t src_tensor_dim = static_cast<size_t>(x->shape.size());
   // Setup the ranges.
   // NOTE: this code duplicates the shape inference logic relay.op
   // Consider to refactor in the future.
-  std::vector<int64_t> stride_vec;
-  for (Integer i : strides) {
-    CHECK(i.defined());
-    stride_vec.push_back(i->value);
+  std::vector<int64_t> stride_vec(src_tensor_dim, 1);
+  for (size_t i = 0; i < strides.size(); ++i) {
+    CHECK(strides[i].defined());
+    stride_vec[i] = strides[i]->value;
   }
-  for (size_t i = stride_vec.size(); i < src_tensor_dim; ++i) {
-    stride_vec.push_back(1);
-  }
+
   const int64_t max_range = std::numeric_limits<int64_t>::max();
 
   std::vector<int64_t> begin_vec;
@@ -559,8 +558,15 @@ inline Tensor strided_slice(const Tensor& x, const Array<Integer>& begin, const 
   std::vector<int64_t> end_vec;
   for (size_t i = 0; i < end.size(); ++i) {
     // allow end to be None
+
     if (!end[i].defined()) {
       end_vec.push_back(stride_vec[i] < 0 ? 0 : max_range);
+    } else if (slice_mode == "size") {
+      if (end[i]->value < 0) {
+        end_vec.push_back(stride_vec[i] < 0 ? 0 : max_range);
+      } else {
+        end_vec.push_back(begin_vec[i] + end[i]->value);
+      }
     } else {
       end_vec.push_back(end[i]->value);
     }
@@ -861,7 +867,7 @@ inline Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y,
     out = compute(
         oshape,
         [&](const Array<Var>& indices) {
-          return tvm::tir::SelectNode::make(condition(indices) != 0, x(indices), y(indices));
+          return tvm::tir::Select(condition(indices) != 0, x(indices), y(indices));
         },
         name, tag);
   } else {
@@ -872,7 +878,7 @@ inline Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y,
         oshape,
         [&](const Array<Var>& indices) {
           Array<PrimExpr> condition_idx{indices[0]};
-          return tvm::tir::SelectNode::make(condition(condition_idx) != 0, x(indices), y(indices));
+          return tvm::tir::Select(condition(condition_idx) != 0, x(indices), y(indices));
         },
         name, tag);
   }
@@ -980,6 +986,54 @@ inline Tensor tile(const Tensor& x, Array<Integer> reps, std::string name = "T_t
         },
         name, tag);
   }
+}
+
+/*!
+ * \brief Gather values along given axis from given indices.
+ *
+ * \param data The input data to the operator.
+ * \param axis The axis along which to index.
+ * \param indices The indices of values to gather.
+ * \param name The name of the operation.
+ * \param tag The tag to mark the operation.
+ *
+ * \return A Tensor whose op member is the gather operation
+ */
+inline Tensor gather(const Tensor& data, int axis, const Tensor& indices,
+                     std::string name = "T_gather", std::string tag = kInjective) {
+  size_t ndim_d = data->shape.size();
+  size_t ndim_i = indices->shape.size();
+  CHECK_GE(ndim_d, 1) << "Cannot gather from a scalar.";
+  CHECK_EQ(ndim_d, ndim_i);
+  CHECK_GE(axis, 0);
+  CHECK_LT(axis, ndim_d);
+  size_t indices_dim_i = static_cast<size_t>(GetConstInt(indices->shape[axis]));
+  CHECK_GE(indices_dim_i, 1);
+  CHECK(indices->dtype.is_int());
+
+  Array<PrimExpr> out_shape;
+  for (size_t i = 0; i < ndim_i; ++i) {
+    out_shape.push_back(indices->shape[i]);
+  }
+
+  return compute(
+      out_shape,
+      [&](const Array<Var>& out_index) {
+        Array<PrimExpr> indices_position;
+        for (size_t i = 0; i < ndim_i; ++i) {
+          indices_position.push_back(out_index[i]);
+        }
+        Array<PrimExpr> real_indices;
+        for (size_t i = 0; i < ndim_i; ++i) {
+          if (i == (size_t)axis) {
+            real_indices.push_back(indices(indices_position));
+          } else {
+            real_indices.push_back(indices_position[i]);
+          }
+        }
+        return data(real_indices);
+      },
+      name, tag);
 }
 
 /*!
@@ -1188,8 +1242,8 @@ inline Tensor layout_transform(const Tensor& src, const std::string& src_layout,
                                const std::string& dst_layout,
                                const std::string name = "T_layout_trans",
                                const std::string tag = kInjective) {
-  Layout src_layout_struct = LayoutNode::make(src_layout);
-  Layout dst_layout_struct = LayoutNode::make(dst_layout);
+  Layout src_layout_struct(src_layout);
+  Layout dst_layout_struct(dst_layout);
 
   if (src_layout_struct.Equals(dst_layout_struct)) {
     return src;
@@ -1306,8 +1360,7 @@ inline Tensor one_hot(const Tensor& indices, const PrimExpr on_value, const Prim
         }
 
         auto idx = iter_vars[true_axis];
-        return tir::SelectNode::make(indices(indices_indices) == idx, on_value_cast,
-                                     off_value_cast);
+        return tir::Select(indices(indices_indices) == idx, on_value_cast, off_value_cast);
       },
       name, tag);
 }

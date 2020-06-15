@@ -131,7 +131,7 @@ def flip(a, axis=0):
     """
     return cpp.flip(a, axis)
 
-def strided_slice(a, begin, end, strides=None):
+def strided_slice(a, begin, end, strides=None, slice_mode="end"):
     """Slice of an array.
 
     Parameters
@@ -139,16 +139,23 @@ def strided_slice(a, begin, end, strides=None):
     a : tvm.te.Tensor
         The tensor to be sliced.
 
-    begin: list of int
+    begin : list of int
         The indices to begin with in the slicing.
 
-    end: list of int
+    end : list of int
         Indicies indicating end of the slice.
 
-    strides: list of int, optional
+    strides : list of int, optional
         Specifies the stride values, it can be negative
         in that case, the input tensor will be reversed
         in that particular axis.
+
+    slice_mode : str, optional
+        The slice mode [end, size].
+        end - The ending indices for the slice [default].
+        size - The input strides will be ignored, input end in this mode indicates
+        the sizeof a slice starting at the location specified by begin. If end[i]
+        is -1, all remaining elements in that dimension are included in the slice.
 
     Returns
     -------
@@ -156,7 +163,7 @@ def strided_slice(a, begin, end, strides=None):
     """
     if strides is None:
         strides = []
-    return cpp.strided_slice(a, begin, end, strides)
+    return cpp.strided_slice(a, begin, end, strides, slice_mode)
 
 @tvm.te.tag_scope(tag=tag.INJECTIVE+",strided_set")
 def strided_set(a, v, begin, end, strides=None):
@@ -365,6 +372,38 @@ def take(a, indices, axis=None, mode="clip"):
     if axis is None:
         return cpp.take(a, indices, mode)
     return cpp.take(a, indices, int(axis), mode)
+
+
+def gather(data, axis, indices):
+    """Gather values along given axis from given indices.
+
+    E.g. for a 3D tensor, output is computed as:
+
+    .. code-block:: python
+
+        out[i][j][k] = data[indices[i][j][k]][j][k]  # if axis == 0
+        out[i][j][k] = data[i][indices[i][j][k]][k]  # if axis == 1
+        out[i][j][k] = data[i][j][indices[i][j][k]]  # if axis == 2
+
+    ``indices`` must have same shape as ``data``, except at dimension ``axis``
+    which must just be not null. Output will have same shape as ``indices``.
+
+    Parameters
+    ----------
+    data : tvm.te.Tensor
+        The input data to the operator.
+
+    axis: int
+        The axis along which to index.
+
+    indices : tvm.te.Tensor
+        The indices of the values to extract.
+
+    Returns
+    -------
+    ret : tvm.te.Tensor
+    """
+    return cpp.gather(data, axis, indices)
 
 
 def gather_nd(a, indices):
