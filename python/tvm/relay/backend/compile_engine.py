@@ -193,11 +193,15 @@ def select_implementation(op, attrs, inputs, out_type, target, use_autotvm=True)
     workloads = {}
     best_autotvm_impl = None
     best_cfg = None
+    # print(op, ",".join([n.name for n in all_impls]))
     dispatch_ctx = autotvm.task.DispatchContext.current
     autotvm.GLOBAL_SCOPE.silent = True
     for impl in all_impls:
         outs = impl.compute(attrs, inputs, out_type)
         outputs[impl] = outs
+        if impl.name.find("cublas") >= 0:
+            best_autotvm_impl = impl
+            break
         workload = autotvm.task.get_workload(outs)
         workloads[impl] = workload
         if workload is None:
