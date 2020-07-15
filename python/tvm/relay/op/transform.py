@@ -37,7 +37,7 @@ def cast(data, dtype):
         The casted result.
     """
     from .. import _make as _relay_make
-    return _relay_make.cast(data, dtype)
+    return _relay_make.cast(data, str(dtype))
 
 
 def cast_like(data, dtype_like):
@@ -308,7 +308,9 @@ def full(fill_value, shape=(), dtype=""):
     result : relay.Expr
         The resulting tensor.
     """
-    return _make.full(fill_value, shape, dtype)
+    if isinstance(shape, (list, tuple)):
+        shape = const(list(shape), "int32")
+    return _make.full(fill_value, shape, str(dtype))
 
 
 def full_like(data, fill_value):
@@ -787,7 +789,7 @@ def sequence_mask(data, valid_length, mask_value=0, axis=0):
     """
     return _make.sequence_mask(data, valid_length, mask_value, axis)
 
-def one_hot(indices, on_value, off_value, depth, axis, dtype):
+def one_hot(indices, on_value, off_value, depth=1, axis=-1, dtype=""):
     """
     Returns a one-hot tensor where the locations repsented by indices take value on_value,
     other locations take value off_value.
@@ -829,4 +831,58 @@ def one_hot(indices, on_value, off_value, depth, axis, dtype):
              [0, 1, 0],
              [0, 0, 1]]
     """
-    return _make.one_hot(indices, on_value, off_value, depth, axis, dtype)
+    return _make.one_hot(indices, on_value, off_value, depth, axis, str(dtype))
+
+
+def unravel_index(indices, shape):
+    """Convert a flat index or array of flat indices into a tuple of coordinate arrays.
+
+    Example::
+    -   unravel_index([22, 41, 37], [7, 6]) = [[3, 6, 6],[4, 5, 1]]
+
+    Parameters
+    ----------
+    indices : relay.Expr
+        An integer array containing indices.
+
+    shape : relay.Expr
+        The shape of the array.
+
+    Returns
+    -------
+    result : relay.Expr
+        The tuple of coordinate arrays.
+    """
+
+    return _make.unravel_index(indices, shape)
+
+def sparse_to_dense(sparse_indices, output_shape, sparse_values, default_value=0):
+    """Converts a sparse representation into a dense tensor.
+
+    Example::
+    -   sparse_to_dense([[0, 0], [1, 1]], [2, 2], [3, 3], 0) = [[3, 0], [0, 3]]
+
+    Parameters
+    ----------
+    sparse_indices : relay.Expr
+        A 0-D, 1-D, or 2-D tensor of integers containing location of sparse values.
+
+    output_shape : relay.Expr
+        A list of integers. Shape of the dense output tensor.
+
+    sparse_values : relay.Expr
+        A 0-D or 1-D tensor containing the sparse values for the sparse indices.
+
+    default_value : relay.Expr
+        A 0-D tensor containing the default value for the remaining locations.
+        Defaults to 0.
+
+    Returns
+    -------
+    result : relay.Expr
+        Dense tensor of shape output_shape. Has the same type as sparse_values.
+    """
+
+    if default_value == 0:
+        default_value = const(0)
+    return _make.sparse_to_dense(sparse_indices, output_shape, sparse_values, default_value)
