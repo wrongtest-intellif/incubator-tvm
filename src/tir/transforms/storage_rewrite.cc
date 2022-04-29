@@ -314,6 +314,7 @@ class InplaceOpVerifier : public StmtExprVisitor {
   }
 
   void VisitStmt_(const BufferStoreNode* op) final {
+    LOG(INFO) << GetRef<Stmt>(op);
     ++mem_nest_;
     for (const auto& index : op->indices) {
       this->VisitExpr(index);
@@ -342,6 +343,7 @@ class InplaceOpVerifier : public StmtExprVisitor {
   }
 
   void VisitExpr_(const BufferLoadNode* op) final {
+    LOG(INFO) << GetRef<PrimExpr>(op);
     const VarNode* buf = op->buffer->data.get();
     // cannot read from dst_ (no reduction)
     if (buf == dst_) {
@@ -778,6 +780,28 @@ class StoragePlanRewriter : public StmtExprMutator {
         }
       }
     }
+
+    std::stringstream ss;
+      ss << "Liveness analysis result:\n";
+      for (size_t i = 0; i < seq.size(); ++i) {
+        int64_t offset = seq[i].scope_pair_offset;
+        if (offset < 0) continue;
+        const StmtEntry& s = seq[i + offset];
+        const auto& events = event_map_[s.stmt];
+        std::stringstream stmt_ss;
+        stmt_ss << GetRef<ObjectRef>(s.stmt);
+        size_t newline_pos = stmt_ss.str().find_first_of('\n');
+
+        ss << stmt_ss.str().substr(0, newline_pos) << "\n"
+           << "[TOUCH] ";
+        for (auto v : s.touched) ss << GetRef<Var>(v) << ", ";
+        ss << "\n[GEN] ";
+        for (auto v : events.gen) ss << GetRef<Var>(v) << ", ";
+        ss << "\n[KILL] ";
+        for (auto v : events.kill) ss << GetRef<Var>(v) << ", ";
+        ss << "\n";
+      }
+      LOG(INFO) << ss.str();
   }
   void PlanNewScope(const Object* op) {
     if (thread_scope_ != nullptr) {
@@ -833,6 +857,7 @@ class StoragePlanRewriter : public StmtExprMutator {
             bool inplace_found = false;
             for (const VarNode* src : it->second.kill) {
               if (!inplace_flag.count(src) && alloc_map_.count(src)) {
+                LOG(INFO) << src->name_hint << " " << var->name_hint;
                 InplaceOpVerifier visitor;
                 StorageEntry* src_entry = alloc_map_.at(src);
                 if (src_entry->scope == storage_scope &&

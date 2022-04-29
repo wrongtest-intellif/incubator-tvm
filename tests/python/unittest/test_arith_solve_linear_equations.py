@@ -22,7 +22,7 @@ from tvm import te, arith, ir, tir, testing
 
 
 def test_solution_consistency():
-    seed = random.randrange(sys.maxsize)
+    seed = 5926982148184041698#random.randrange(sys.maxsize)
     print(
         "\nThis test is intentionally non-deterministic, "
         "if it fails please report it in github issue together with this seed {}\n".format(seed)

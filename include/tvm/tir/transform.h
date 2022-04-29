@@ -260,6 +260,13 @@ TVM_DLL Pass DecorateDeviceScope();
 TVM_DLL Pass SplitHostDevice();
 
 /*!
+ * \brief Split out invoked local functions.
+ *
+ * \return The pass.
+ */
+TVM_DLL Pass SplitLocalFuncs();
+
+/*!
  * \brief skip assert stmt.
  *
  * \return The pass.

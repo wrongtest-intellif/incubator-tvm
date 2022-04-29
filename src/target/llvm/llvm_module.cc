@@ -229,6 +229,12 @@ class LLVMModuleNode final : public runtime::ModuleNode {
     bool system_lib = runtime->GetAttr<Bool>("system-lib").value_or(Bool(false));
     bool target_c_runtime = runtime->name == "crt";
 
+    // TODO(@jroesch): follow up on this condition.
+    // ICHECK(funcs.size() > 0 || (could_have_linked_params && found_linked_params));
+    // TODO(tqchen): remove the entry function behavior as it does not
+    // makes sense when we start to use multiple modules.
+    cg->Init("TVMMod", tm_.get(), ctx_.get(), system_lib, system_lib, target_c_runtime);
+
     for (auto kv : mod->functions) {
       if (could_have_linked_params &&
           kv.first->name_hint == ::tvm::runtime::symbol::tvm_lookup_linked_param) {
@@ -254,14 +260,10 @@ class LLVMModuleNode final : public runtime::ModuleNode {
       if (f->HasNonzeroAttr(tir::attr::kIsEntryFunc)) {
         entry_func = global_symbol.value();
       }
+      cg->AddFunctionDef(kv.first, f);
       funcs.push_back(f);
     }
-    // TODO(@jroesch): follow up on this condition.
-    // ICHECK(funcs.size() > 0 || (could_have_linked_params && found_linked_params));
-    // TODO(tqchen): remove the entry function behavior as it does not
-    // makes sense when we start to use multiple modules.
-    cg->Init("TVMMod", tm_.get(), ctx_.get(), system_lib, system_lib, target_c_runtime);
-
+    
     // See https://llvm.org/docs/LangRef.html#fast-math-flags for details
     Bool fast_math_all = target->GetAttr<Bool>("fast-math").value_or(Bool(false));
     Bool fast_math_nnan = target->GetAttr<Bool>("fast-math-nnan").value_or(Bool(false));
@@ -328,9 +330,12 @@ class LLVMModuleNode final : public runtime::ModuleNode {
 
     std::string verify_errors_storage;
     llvm::raw_string_ostream verify_errors(verify_errors_storage);
+    std::string vv;
+    llvm::raw_string_ostream vvv(vv);
+    vvv << *module_;
     LOG_IF(FATAL, llvm::verifyModule(*module_, &verify_errors))
         << "LLVM module verification failed with the following errors: \n"
-        << verify_errors.str();
+        << verify_errors.str() << vv;
     target_ = target;
     mptr_ = module_.get();
   }

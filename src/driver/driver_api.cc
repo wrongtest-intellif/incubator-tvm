@@ -430,6 +430,9 @@ std::pair<IRModule, IRModule> SplitMixedModule(IRModule mod_mixed, const Target&
 
   IRModule device_mod = ApplyPasses(mod_mixed, DeviceModulePassManager(mod_mixed, target));
 
+  LOG(INFO) << host_mod;
+  LOG(INFO) << device_mod;
+
   auto keys = target->GetKeys();
 
   CheckAndUpdateHostConsistency(&target, &target_host);
@@ -580,16 +583,7 @@ transform::Sequential MixedModulePassManager(IRModule mixed_mod, Target target) 
   mixed_pass_list.push_back(tir::transform::ThreadSync("warp"));
   mixed_pass_list.push_back(tir::transform::InferFragment());
   mixed_pass_list.push_back(tir::transform::LowerThreadAllreduce());
-
-  bool unpacked_api = mixed_mod->GetAttr<relay::Executor>(tvm::attr::kExecutor)
-                          .value_or(relay::Executor::Create("graph", {}))
-                          ->GetAttr<Bool>("unpacked-api")
-                          .value_or(Bool(false));
-  if (unpacked_api) {
-    mixed_pass_list.push_back(tir::transform::MakeUnpackedAPI());
-  } else {
-    mixed_pass_list.push_back(tir::transform::MakePackedAPI(-1));
-  }
+  mixed_pass_list.push_back(tir::transform::SplitLocalFuncs());
   mixed_pass_list.push_back(tir::transform::SplitHostDevice());
 
   return transform::Sequential(mixed_pass_list);
@@ -610,7 +604,17 @@ transform::Sequential HostModulePassManager(IRModule mixed_mod, Target target_ho
   ICHECK(mixed_mod.defined()) << "This module must be defined";
 
   host_pass_list.push_back(BindTarget(target_host));
-
+  
+  bool unpacked_api = mixed_mod->GetAttr<relay::Executor>(tvm::attr::kExecutor)
+                          .value_or(relay::Executor::Create("graph", {}))
+                          ->GetAttr<Bool>("unpacked-api")
+                          .value_or(Bool(false));
+  if (unpacked_api) {
+    host_pass_list.push_back(tir::transform::MakeUnpackedAPI());
+  } else {
+    host_pass_list.push_back(tir::transform::MakePackedAPI(-1));
+  }
+ 
   host_pass_list.push_back(tir::transform::LowerTVMBuiltin());
   host_pass_list.push_back(tir::transform::LowerCustomDatatypes());
   host_pass_list.push_back(tir::transform::LowerIntrin());
@@ -621,15 +625,16 @@ transform::Sequential HostModulePassManager(IRModule mixed_mod, Target target_ho
 }
 
 TVM_REGISTER_GLOBAL("driver.host_mod_passes")
-    .set_body_typed([](IRModule mixed_mod, Target target_host) {
-      return HostModulePassManager(mixed_mod, target_host);
+    .set_body_typed([](IRModule mixed_mod, Target target) {
+      return HostModulePassManager(mixed_mod, target);
     });
 
 transform::Sequential DeviceModulePassManager(IRModule mixed_mod, Target target) {
   Array<Pass> device_pass_list;
-  device_pass_list.push_back(Filter([](const tir::PrimFunc& f) {
+  device_pass_list.push_back(Filter([&target](const tir::PrimFunc& f) {
     return f->GetAttr<Integer>(tvm::attr::kCallingConv, Integer(CallingConv::kDefault)) ==
-           CallingConv::kDeviceKernelLaunch;
+           CallingConv::kDeviceKernelLaunch ||
+      f->GetAttr<Target>(tvm::attr::kTarget).value_or(Target()) == target;
   }));
 
   device_pass_list.push_back(BindTarget(target));
@@ -644,8 +649,8 @@ transform::Sequential DeviceModulePassManager(IRModule mixed_mod, Target target)
 }
 
 TVM_REGISTER_GLOBAL("driver.device_mod_passes")
-    .set_body_typed([](IRModule mixed_mod, Target target_host) {
-      return DeviceModulePassManager(mixed_mod, target_host);
+    .set_body_typed([](IRModule mixed_mod, Target target) {
+      return DeviceModulePassManager(mixed_mod, target);
     });
 
 }  // namespace tvm

@@ -38,6 +38,8 @@
 #include "codegen_params.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm_common.h"
+#include "../../printer/text_printer.h"
+
 namespace tvm {
 namespace codegen {
 
@@ -112,36 +114,52 @@ void CodeGenLLVM::InitFuncState() {
   analyzer_.reset(new arith::Analyzer());
 }
 
-void CodeGenLLVM::AddFunctionInternal(const PrimFunc& f, bool ret_void) {
-  this->InitFuncState();
-
-  ICHECK_EQ(f->buffer_map.size(), 0U)
-      << "Cannot codegen function with buffer_map, please lower them first";
-
+llvm::FunctionType* CodeGenLLVM::GetLLVMFunctionType(const PrimFunc& f, bool ret_void) {
   std::vector<llvm::Type*> param_types;
-  is_restricted_ = f->HasNonzeroAttr(tir::attr::kNoAlias);
   for (Var param : f->params) {
     param_types.push_back(GetLLVMType(param));
-    if (!is_restricted_ && param.dtype().is_handle()) {
-      alias_var_set_.insert(param.get());
-    }
   }
   // TODO(tvm-team):
   // Update the function type to respect the ret_type field of f.
   // Once we allow more flexibility in the PrimFunc.
   llvm::FunctionType* ftype =
       llvm::FunctionType::get(ret_void ? t_void_ : t_int_, param_types, false);
+  return ftype;
+}
+
+void CodeGenLLVM::AddFunctionDef(const GlobalVar& gv, const PrimFunc& f) {
+  ICHECK_EQ(f->buffer_map.size(), 0U)
+      << "Cannot codegen function with buffer_map, please lower them first";
+  is_restricted_ = f->HasNonzeroAttr(tir::attr::kNoAlias);
+  for (Var param : f->params) {
+    if (!is_restricted_ && param.dtype().is_handle()) {
+      alias_var_set_.insert(param.get());
+    }
+  }
+  llvm::FunctionType* ftype = GetLLVMFunctionType(f, false);
+  auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
+  ICHECK(global_symbol.defined())
+      << "CodeGenLLVM: Expect PrimFunc to have the global_symbol attribute";
+  ICHECK(module_->getFunction(static_cast<std::string>(global_symbol.value())) == nullptr && !llvm_func_map_.count(gv))
+      << "Function " << global_symbol << " already defined in module";
+  
+  llvm::Function* function = llvm::Function::Create(ftype, llvm::Function::ExternalLinkage,
+                                     global_symbol.value().operator std::string(), module_.get());
+  function->setCallingConv(llvm::CallingConv::C);
+  function->setDLLStorageClass(llvm::GlobalValue::DLLStorageClassTypes::DLLExportStorageClass);
+  llvm_func_map_[gv] = function;
+}
+
+void CodeGenLLVM::AddFunctionInternal(const PrimFunc& f, bool ret_void) {
+  LOG(INFO) << tir::AsTVMScript(f, "T", false);
+  this->InitFuncState();
 
   auto global_symbol = f->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol.defined())
       << "CodeGenLLVM: Expect PrimFunc to have the global_symbol attribute";
-  function_ = module_->getFunction(static_cast<std::string>(global_symbol.value()));
-  if (function_ == nullptr) {
-    function_ = llvm::Function::Create(ftype, llvm::Function::ExternalLinkage,
-                                       global_symbol.value().operator std::string(), module_.get());
-  }
-  function_->setCallingConv(llvm::CallingConv::C);
-  function_->setDLLStorageClass(llvm::GlobalValue::DLLStorageClassTypes::DLLExportStorageClass);
+  function_ = module_->getFunction(global_symbol.value().c_str());
+  ICHECK(function_) << "Function " << global_symbol << " not defined in module";
+  ICHECK_EQ(function_->getInstructionCount(), 0U) << "Function " << global_symbol << " already get code generated in module";
 
   // set var map and align information
   auto arg_it = function_->arg_begin();
@@ -270,7 +288,7 @@ std::unique_ptr<llvm::Module> CodeGenLLVM::Finish() {
   }
   link_modules_.clear();
   // optimize
-  this->Optimize();
+  // this->Optimize();
   return std::move(module_);
 }
 
@@ -1439,8 +1457,14 @@ llvm::Value* CodeGenLLVM::VisitExpr_(const CallNode* op) {
     }
   } else {
     ICHECK(op->op.as<GlobalVarNode>());
-    LOG(FATAL) << "Do not yet support cross function call";
-    return nullptr;
+    GlobalVar gv = Downcast<GlobalVar>(op->op);
+    auto it = llvm_func_map_.find(gv);
+    ICHECK(it != llvm_func_map_.end()) << "Call into undefined function " << gv;
+    std::vector<llvm::Value*> arg_values;
+    for (const PrimExpr& e : op->args) {
+      arg_values.push_back(MakeValue(e));
+    }
+    return builder_->CreateCall(it->second, arg_values);
   }
 }
 
@@ -1651,6 +1675,14 @@ void CodeGenLLVM::VisitStmt_(const LetStmtNode* op) {
     }
   }
   llvm::Value* value = MakeValue(op->value);
+  if (v->dtype.code() == DataType::kHandle && v->type_annotation.defined()) {
+    ICHECK(value->getType()->isPointerTy());
+    PointerType ptr_type = Downcast<PointerType>(v->type_annotation);
+    llvm::Type* llvm_ptr_ty = GetLLVMType(ptr_type);
+    if (llvm_ptr_ty != value->getType()) {
+      value = builder_->CreatePointerCast(value, llvm_ptr_ty);
+    }
+  }
   value->setName(v->name_hint.c_str());
   var_map_[v] = value;
   analyzer_->Bind(op->var, op->value);

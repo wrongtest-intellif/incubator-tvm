@@ -121,6 +121,12 @@ class CodeGenLLVM : public ExprFunctor<llvm::Value*(const PrimExpr&)>,
     this->AddFunctionsOrdered(begin, end, [](auto f) { return f; });
   }
   /*!
+   * \brief Add tir function definition to the module.
+   * \param gv The global var refering the function.
+   * \param f The function to be added.
+   */
+  virtual void AddFunctionDef(const GlobalVar& gv, const PrimFunc& f);
+  /*!
    * \brief Add mod to be linked with the generated module
    * \param mod The module to be linked.
    */
@@ -309,6 +315,8 @@ class CodeGenLLVM : public ExprFunctor<llvm::Value*(const PrimExpr&)>,
   // Get correct address space depending on the backend
   virtual unsigned GetGlobalAddressSpace() const;
   void AddFunctionInternal(const PrimFunc& f, bool ret_void);
+  // Get llvm function type for primfunc
+  llvm::FunctionType* GetLLVMFunctionType(const PrimFunc& f, bool ret_void);
   // Create extern call
   llvm::CallInst* CreateCallExtern(llvm::Type* ret, const std::string& name,
                                    const std::vector<llvm::Value*>& value);
@@ -475,6 +483,8 @@ class CodeGenLLVM : public ExprFunctor<llvm::Value*(const PrimExpr&)>,
   ExprDeepEqual deep_equal_;
   // binding of let variables. Enables duplicate var defs that map to same value
   std::unordered_map<Var, const LetNode*, ObjectPtrHash, ObjectPtrEqual> let_binding_;
+  // mapping global var to llvm functions.
+  std::unordered_map<GlobalVar, llvm::Function*, ObjectPtrHash, ObjectPtrEqual> llvm_func_map_;
   // Cache potential common path ops to slightly improve lookup time.
   // global symbol table.
   OpAttrMap<TGlobalSymbol> op_attr_global_symbol_ = Op::GetAttrMap<TGlobalSymbol>("TGlobalSymbol");

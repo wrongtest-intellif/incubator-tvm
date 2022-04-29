@@ -243,25 +243,111 @@ Array<Var> UndefinedVars(const PrimExpr& expr) {
   return m.undefined_;
 }
 
-class HostDeviceSplitter : public StmtMutator {
- public:
-  explicit HostDeviceSplitter(IRModule* device_mod, Target device_target, std::string name_prefix)
-      : device_mod_(device_mod), device_target_(device_target), name_prefix_(name_prefix) {}
-
-  Stmt VisitStmt_(const AllocateNode* op) final {
-    handle_data_type_[op->buffer_var.get()] = make_const(op->dtype, 0);
-    return StmtMutator::VisitStmt_(op);
+/*! \brief convert function to a function which can be invoked locally */
+PrimFunc MakeLocalFunction(PrimFunc func, String funcname, Target target) {
+  auto n = func.CopyOnWrite();
+  Array<Var> new_params;
+  Map<tir::Var, PrimExpr> remap_vars;
+  for (const Var& param : func->params) {
+    auto it = func->buffer_map.find(param);
+    if (it != func->buffer_map.end()) {
+      tir::Var new_param(param->name_hint, PointerType(PrimType((*it).second->dtype)));
+      new_params.push_back(new_param);
+      remap_vars.Set((*it).second->data, new_param);
+    } else {
+      new_params.push_back(param);
+    }
   }
+  n->body = Substitute(n->body, remap_vars);
+  n->params = new_params;
+  n->buffer_map.clear();
+  n->preflattened_buffer_map.clear();
+  PrimFunc local_func = GetRef<PrimFunc>(n);
+  local_func = WithAttr(local_func, tvm::attr::kGlobalSymbol, funcname);
+  local_func = WithAttr(local_func, tvm::attr::kTarget, target);
+  local_func = WithAttr(local_func, tvm::attr::kCallingConv, Integer(CallingConv::kDefault));
+  local_func = WithAttr(local_func, tir::attr::kIsGlobalFunc, Integer(0));
+  return local_func;
+}
 
-  Stmt VisitStmt_(const AttrStmtNode* op) final {
-    if (op->attr_key == attr::thread_extent || op->attr_key == attr::pipeline_exec_scope ||
-        op->attr_key == attr::device_scope) {
-      return SplitDeviceFunc(GetRef<Stmt>(op));
+/*! \brief convert body to device global function */
+
+
+class HostDeviceSplitter : public StmtExprMutator {
+ public:
+  explicit HostDeviceSplitter(const IRModule& origin_mod, IRModule* host_mod, IRModule* device_mod, Target device_target, std::string name_prefix,
+                              Map<GlobalVar, GlobalVar> host_local_gvs, Map<GlobalVar, GlobalVar> device_local_gvs)
+      : origin_mod_(origin_mod), host_mod_(host_mod), device_mod_(device_mod), device_target_(device_target), name_prefix_(name_prefix),
+        host_local_gvs_(host_local_gvs), device_local_gvs_(device_local_gvs) {}
+
+ private:
+  Stmt VisitStmt_(const AllocateNode* op) final {
+    if (!in_device_) {
+      handle_data_type_[op->buffer_var.get()] = make_const(op->dtype, 0);
     }
     return StmtMutator::VisitStmt_(op);
   }
 
- private:
+  Stmt VisitStmt_(const AttrStmtNode* op) final {
+    if (!in_device_) {
+      return StmtMutator::VisitStmt_(op);
+    }
+    if (op->attr_key == attr::thread_extent || op->attr_key == attr::pipeline_exec_scope ||
+        op->attr_key == attr::device_scope) {
+      in_device_ = true;
+      Stmt res =  SplitDeviceFunc(GetRef<Stmt>(op));
+      in_device_ = false;
+      return res;
+    }
+    return StmtMutator::VisitStmt_(op);
+  }
+
+  PrimExpr VisitExpr_(const CallNode* op) final {
+    if (const GlobalVarNode* gv_node = op->op.as<GlobalVarNode>()) {
+      GlobalVar origin_gv = GetRef<GlobalVar>(gv_node);
+      PrimFunc callee_func = Downcast<PrimFunc>(origin_mod_->Lookup(origin_gv));
+      Integer is_entry = callee_func->GetAttr<Integer>(tir::attr::kIsGlobalFunc).value_or(Integer(0));
+      Integer is_global = callee_func->GetAttr<Integer>(tir::attr::kIsEntryFunc).value_or(Integer(0));
+      Integer call_conv = callee_func->GetAttr<Integer>(tvm::attr::kCallingConv).value_or(Integer(CallingConv::kDefault));
+      ICHECK_EQ(is_entry->value, 0) << "Callee function " << origin_gv << " should not be entry function";
+      ICHECK_EQ(is_global->value, 0) << "Callee function " << origin_gv << " should not be global function";
+      ICHECK(call_conv == CallingConv::kDefault) << "Callee function " << origin_gv << " should have default call convention";
+
+      // gv to replace
+      GlobalVar local_gv;
+
+      if (in_device_) {
+        auto it = device_local_gvs_.find(origin_gv);
+        if (it == device_local_gvs_.end()) {
+          std::string local_symbol = origin_gv->name_hint + "_device_local" + std::to_string(device_local_gvs_.size());
+          local_gv = GlobalVar(local_symbol);
+          PrimFunc device_local_func = MakeLocalFunction(callee_func, local_symbol, device_target_);
+          device_local_gvs_.Set(origin_gv, local_gv);
+          (*device_mod_)->Add(local_gv, device_local_func);
+        } else {
+          local_gv = (*it).second;
+        }
+      } else {
+        auto it = host_local_gvs_.find(origin_gv);
+        if (it == host_local_gvs_.end()) {
+          std::string local_symbol = origin_gv->name_hint + "_host_local" + std::to_string(host_local_gvs_.size());
+          local_gv = GlobalVar(local_symbol);
+          PrimFunc host_local_func = MakeLocalFunction(callee_func, local_symbol, Target(nullptr));
+          host_local_gvs_.Set(origin_gv, local_gv);
+          (*host_mod_)->Add(local_gv, host_local_func);
+        } else {
+          local_gv = (*it).second;
+        }
+      }
+      Array<PrimExpr> args;
+      for (const auto& e : op->args) {
+        args.push_back(VisitExpr(e));
+      }
+      return std::move(Call(op->dtype, local_gv, args, op->span));
+    }
+    return StmtExprMutator::VisitExpr_(op);
+  }
+
   Stmt SplitDeviceFunc(Stmt body) {
     std::ostringstream os;
     os << name_prefix_ << "_kernel" << device_func_counter_++;
@@ -269,7 +355,7 @@ class HostDeviceSplitter : public StmtMutator {
     // isolate the device function.
     VarUseDefAnalysis m;
     m.visit_thread_extent_ = false;
-    body = m(std::move(body));
+    body = m(std::move(VisitStmt(body)));
 
     Array<Var> params;
     Array<PrimExpr> arguments;
@@ -327,7 +413,11 @@ class HostDeviceSplitter : public StmtMutator {
     return Evaluate(Call(DataType::Int(32), builtin::tvm_call_packed(), call_args));
   }
 
-  // target ir module
+  // immutable origin ir module
+  const IRModule& origin_mod_;
+  // target ir module for host functions
+  IRModule* host_mod_;
+  // target ir module for on-device functions
   IRModule* device_mod_;
   // Device target
   Target device_target_;
@@ -335,41 +425,62 @@ class HostDeviceSplitter : public StmtMutator {
   std::string name_prefix_;
   // Number of device functions.
   int device_func_counter_{0};
+  // Whether it is visiting device part
+  bool in_device_{false};
+  // Mapping from original gv to host local function gv
+  Map<GlobalVar, GlobalVar> host_local_gvs_;
+  // Mapping from original gv to device local function gv
+  Map<GlobalVar, GlobalVar> device_local_gvs_;
   std::unordered_map<const VarNode*, PrimExpr> handle_data_type_;
 };
 
-PrimFunc SplitHostDevice(PrimFunc&& func, IRModule* device_mod) {
+void SplitHostDevice(const GlobalVar& gv, PrimFunc func,
+                     const IRModule& origin_mod,
+                     IRModule* host_mod, IRModule* device_mod,
+                     Map<GlobalVar, GlobalVar> host_local_gvs,
+                     Map<GlobalVar, GlobalVar> device_local_gvs) {
   auto target = func->GetAttr<Target>(tvm::attr::kTarget);
   ICHECK(target.defined()) << "SplitHostDevice: Require the target attribute";
   auto global_symbol = func->GetAttr<String>(tvm::attr::kGlobalSymbol);
   ICHECK(global_symbol.defined())
       << "SplitHostDevice: Expect PrimFunc to have the global_symbol attribute";
 
-  HostDeviceSplitter splitter(device_mod, target.value(),
-                              static_cast<std::string>(global_symbol.value()));
+  if (func->GetAttr(tir::attr::kIsGlobalFunc, Integer(1)).value() == 0) {
+    // handle local device func
+    GlobalVar local_gv(gv->name_hint);
+    PrimFunc device_local_func = MakeLocalFunction(func, global_symbol.value(), target.value());
+    device_local_gvs.Set(gv, local_gv);
+    (*device_mod)->Add(local_gv, device_local_func);
+    return;
+  }
 
-  auto* n = func.CopyOnWrite();
-  n->body = splitter(std::move(n->body));
+  HostDeviceSplitter splitter(origin_mod, host_mod, device_mod, target.value(),
+                              global_symbol.value(),
+                              host_local_gvs, device_local_gvs);
+  func.CopyOnWrite()->body = splitter(std::move(func->body));
+
   // set the host target to None.
-  func = WithAttr(std::move(func), tvm::attr::kTarget, Target(nullptr));
-  return std::move(func);
+  func = WithAttr(func, tvm::attr::kTarget, Target(nullptr));
+  (*host_mod)->Add(gv, func);
 }
 
 namespace transform {
 
 Pass SplitHostDevice() {
   auto pass_func = [](IRModule mod, PassContext ctx) {
-    IRModuleNode* mod_ptr = mod.CopyOnWrite();
-    auto* func_dict = mod_ptr->functions.CopyOnWrite();
+    IRModule host_mod = IRModule(Map<GlobalVar, BaseFunc>({}));
+    Map<GlobalVar, GlobalVar> host_local_gvs;
+    
     IRModule device_mod = IRModule(Map<GlobalVar, BaseFunc>({}));
+    Map<GlobalVar, GlobalVar> device_local_gvs;
 
-    for (auto& kv : *func_dict) {
+    for (const auto& kv : mod->functions) {           
       if (kv.second->IsInstance<PrimFuncNode>()) {
         PrimFunc func = Downcast<PrimFunc>(std::move(kv.second));
-        ICHECK(device_mod.defined()) << "The device module must be defined.";
-        kv.second = SplitHostDevice(std::move(func), &device_mod);
+        SplitHostDevice(kv.first, func, mod, &host_mod, &device_mod, host_local_gvs, device_local_gvs);
       }
     }
+    mod->Update(host_mod);
     mod->Update(device_mod);
     return mod;
   };

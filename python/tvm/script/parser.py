@@ -848,7 +848,10 @@ class TVMScriptParser(Transformer):
                 )
             self.report_error(f"Unsupported operator {node.func_name.name}.", node.func_name.span)
         else:
-            func = self.transform(node.func_name)
+            if isinstance(node.func_name, ast.Var):
+                func = tvm.ir.GlobalVar(node.func_name.id.name)
+            else:
+                func = self.transform(node.func_name)
             if isinstance(func, Intrin) and not func.stmt:
                 # pattern 1
                 arg_list = self.parse_arg_list(func, node)
@@ -864,7 +867,7 @@ class TVMScriptParser(Transformer):
                 kw_args = {
                     self.transform(k): self.transform(v) for k, v in node.keyword_params.items()
                 }
-                if isinstance(func, tvm.tir.op.Op):
+                if isinstance(func, (tvm.tir.op.Op, tvm.ir.GlobalVar)):
                     if not "dtype" in kw_args.keys():
                         self.report_error(f"{func} requires a dtype keyword argument.", node.span)
                     # pattern 2
@@ -1264,6 +1267,43 @@ def from_source(
         raise TypeError("Only function definitions are supported.")
 
 
+def unify_global_vars(module: tvm.ir.IRModule):
+    """Unify global vars with the same name in tir call ops.
+    
+    Parameters
+    ----------
+    module : tvm.ir.IRModule
+        The input module
+    
+    Returns
+    -------
+    output : tvm.ir.IRModule
+        The result module
+    """
+    name_dict = {}
+
+    def _post_transform(call):
+        if isinstance(call.op, tvm.ir.GlobalVar):
+            funcname = call.op.name_hint
+            if not funcname in name_dict:
+                raise ValueError(f"Unknown function identifier {funcname}")
+            return tvm.tir.Call(call.dtype, name_dict[funcname], call.args, call.span)
+        return call
+
+    for gv in module.get_global_vars():
+        if gv.name_hint in name_dict:
+            raise ValueError(f"Duplicate function name {gv.name_hint}")
+        name_dict[gv.name_hint] = gv
+    for gv in module.get_global_vars():
+        func = module[gv]
+        new_body = tvm.tir.stmt_functor.ir_transform(
+            func.body, None, _post_transform, ["tir.Call"]
+        )
+        func = func.with_body(new_body)
+        module.update_func(gv, func)
+    return module
+    
+
 def ir_module(input_module: type) -> IRModule:
     """Decorate a python class as tvm IRModule.
 
@@ -1281,5 +1321,5 @@ def ir_module(input_module: type) -> IRModule:
         func_dict = {
             name: f for name, f in input_module.__dict__.items() if isinstance(f, BaseFunc)
         }
-        return IRModule(func_dict)
+        return unify_global_vars(IRModule(func_dict))
     raise TypeError("Only class definitions are supported.")
