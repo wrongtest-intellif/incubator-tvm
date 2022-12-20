@@ -442,6 +442,7 @@ StmtSRef DecomposePaddingImpl(ScheduleState self, const StmtSRef& block_sref,
     if (!found_const_filling_pos) {
       if (cur_loop.same_as(const_filling_pos)) {
         found_const_filling_pos = true;
+        found_in_bound_filling_pos = true;
       }
     }
 
