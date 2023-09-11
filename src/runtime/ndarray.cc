@@ -324,6 +324,115 @@ bool NDArray::IsAligned(const DLTensor& tensor) {
           0);
 }
 
+bool SaveDLTensorMetaData(dmlc::Stream* strm, const DLTensor* tensor) {
+  uint64_t header = kTVMNDArrayMagic, reserved = 0;
+  strm->Write(header);
+  strm->Write(reserved);
+  // Always save data as CPU context
+  //
+  // Parameters that get serialized should be in CPU by default.
+  // So even the array's context is GPU, it will be stored as CPU array.
+  // This is used to prevent case when another user loads the parameters
+  // back on machine that do not have GPU or related context.
+  //
+  // We can always do array.CopyTo(target_dev) to get a corresponding
+  // array in the target context.
+  Device cpu_dev;
+  cpu_dev.device_type = kDLCPU;
+  cpu_dev.device_id = 0;
+  strm->Write(cpu_dev);
+  strm->Write(tensor->ndim);
+  strm->Write(tensor->dtype);
+  int ndim = tensor->ndim;
+  strm->WriteArray(tensor->shape, ndim);
+  return true;
+}
+
+bool SaveDLTensor(dmlc::Stream* strm, const DLTensor* tensor, uint64_t data_offset) {
+  ICHECK(SaveDLTensorMetaData(strm, tensor)) << "Invalid DLTensor metadata";
+
+  int type_bytes = (tensor->dtype.bits + 7) / 8;
+  int64_t num_elems = 1;
+  for (int i = 0; i < tensor->ndim; ++i) {
+    num_elems *= tensor->shape[i];
+  }
+  int64_t data_byte_size = type_bytes * num_elems;
+  strm->Write(data_byte_size + data_offset);
+  if (data_offset > 0) {
+    std::vector<uint8_t> pad(data_offset, 0);
+    strm->Write(pad.data(), pad.size());
+  }
+  if (DMLC_IO_NO_ENDIAN_SWAP && tensor->device.device_type == kDLCPU &&
+      tensor->strides == nullptr && tensor->byte_offset == 0) {
+    // quick path
+    const void* begin_ptr = reinterpret_cast<uint8_t*>(tensor->data) + tensor->byte_offset;
+    strm->Write(begin_ptr, data_byte_size);
+  } else {
+    std::vector<uint8_t> bytes(data_byte_size);
+    ICHECK_EQ(
+        TVMArrayCopyToBytes(const_cast<DLTensor*>(tensor), dmlc::BeginPtr(bytes), data_byte_size),
+        0)
+        << TVMGetLastError();
+    if (!DMLC_IO_NO_ENDIAN_SWAP) {
+      dmlc::ByteSwap(dmlc::BeginPtr(bytes), type_bytes, num_elems);
+    }
+    strm->Write(dmlc::BeginPtr(bytes), data_byte_size);
+  }
+  return true;
+}
+
+void NDArray::Save(dmlc::Stream* strm) const { SaveDLTensor(strm, operator->()); }
+
+bool LoadDLTensorMetaData(dmlc::Stream* strm, DLTensor* tensor, std::vector<int64_t>* shape) {
+  uint64_t header, reserved;
+  ICHECK(strm->Read(&header)) << "Invalid DLTensor file format";
+  ICHECK(strm->Read(&reserved)) << "Invalid DLTensor file format";
+  ICHECK(header == kTVMNDArrayMagic) << "Invalid DLTensor file format";
+  ICHECK(strm->Read(&tensor->device)) << "Invalid DLTensor file format";
+  ICHECK(strm->Read(&tensor->ndim)) << "Invalid DLTensor file format";
+  ICHECK(strm->Read(&tensor->dtype)) << "Invalid DLTensor file format";
+  ICHECK_EQ(tensor->device.device_type, kDLCPU) << "Invalid DLTensor device: can only save as CPU tensor";
+  shape->resize(tensor->ndim);
+  if (tensor->ndim != 0) {
+    ICHECK(strm->ReadArray(shape->data(), tensor->ndim)) << "Invalid DLTensor file format";
+  }
+  tensor->shape = shape->data();
+  return true;
+}
+
+bool NDArray::Load(dmlc::Stream* strm) {
+  std::vector<int64_t> shape;
+  DLTensor dl_tensor;
+  ICHECK(LoadDLTensorMetaData(strm, &dl_tensor, &shape)) << "Invalid DLTensor metadata";
+
+  NDArray ret = NDArray::Empty(ShapeTuple(shape), dl_tensor.dtype, dl_tensor.device);
+  int64_t num_elems = 1;
+  int elem_bytes = (ret->dtype.bits + 7) / 8;
+  for (int i = 0; i < ret->ndim; ++i) {
+    num_elems *= ret->shape[i];
+  }
+  int64_t data_byte_size;
+  ICHECK(strm->Read(&data_byte_size)) << "Invalid DLTensor file format";
+  ICHECK_GE(data_byte_size, num_elems * elem_bytes) << "Invalid DLTensor file format";
+
+  int64_t data_offset = data_byte_size - num_elems * elem_bytes;
+  if (data_offset > 0) {
+    std::vector<uint8_t> pad(data_offset);
+    strm->Read(pad.data(), data_offset);
+  }
+
+  auto read_ret = strm->Read(ret->data, data_byte_size);
+  // Only check non-empty data
+  if (dl_tensor.ndim > 0 && shape[0] != 0) {
+    ICHECK(read_ret) << "Invalid DLTensor file format";
+  }
+  if (!DMLC_IO_NO_ENDIAN_SWAP) {
+    dmlc::ByteSwap(ret->data, elem_bytes, num_elems);
+  }
+  *this = ret;
+  return true;
+}
+
 TVM_REGISTER_OBJECT_TYPE(NDArray::Container);
 
 }  // namespace runtime

@@ -119,12 +119,12 @@ class NDArray : public ObjectRef {
    * \param stream The input data stream
    * \return Whether load is successful
    */
-  inline bool Load(dmlc::Stream* stream);
+  bool Load(dmlc::Stream* stream);
   /*!
    * \brief Save NDArray to stream
    * \param stream The output data stream
    */
-  inline void Save(dmlc::Stream* stream) const;
+  void Save(dmlc::Stream* stream) const;
   /*!
    * \brief Create a NDArray that shares the data memory with the current one.
    * \param shape The shape of the new array.
@@ -241,11 +241,27 @@ class NDArray : public ObjectRef {
 };
 
 /*!
- * \brief Save a DLTensor to stream
+ * \brief Load a DLTensor's metadata fields from stream
+ * \param strm The input stream
+ * \param tensor The tensor to be updated.
+ * \param shape The shape array back the shape data.
+ */
+bool LoadDLTensorMetaData(dmlc::Stream* strm, DLTensor* tensor, std::vector<int64_t>* shape);
+
+/*!
+ * \brief Save a DLTensor's metadata fields to stream
  * \param strm The output stream
  * \param tensor The tensor to be saved.
  */
-inline bool SaveDLTensor(dmlc::Stream* strm, const DLTensor* tensor);
+bool SaveDLTensorMetaData(dmlc::Stream* strm, const DLTensor* tensor);
+
+/*!
+ * \brief Save a DLTensor to stream
+ * \param strm The output stream
+ * \param tensor The tensor to be saved.
+ * \param data_offset The offset in bytes between metadata and tensor data.
+ */
+bool SaveDLTensor(dmlc::Stream* strm, const DLTensor* tensor, uint64_t data_offset = 0);
 
 /*!
  * \brief The container base structure
@@ -440,91 +456,6 @@ inline Object* TVMArrayHandleToObjectHandle(TVMArrayHandle handle) {
 /*! \brief Magic number for NDArray file */
 constexpr uint64_t kTVMNDArrayMagic = 0xDD5E40F096B4A13F;
 
-inline bool SaveDLTensor(dmlc::Stream* strm, const DLTensor* tensor) {
-  uint64_t header = kTVMNDArrayMagic, reserved = 0;
-  strm->Write(header);
-  strm->Write(reserved);
-  // Always save data as CPU context
-  //
-  // Parameters that get serialized should be in CPU by default.
-  // So even the array's context is GPU, it will be stored as CPU array.
-  // This is used to prevent case when another user loads the parameters
-  // back on machine that do not have GPU or related context.
-  //
-  // We can always do array.CopyTo(target_dev) to get a corresponding
-  // array in the target context.
-  Device cpu_dev;
-  cpu_dev.device_type = kDLCPU;
-  cpu_dev.device_id = 0;
-  strm->Write(cpu_dev);
-  strm->Write(tensor->ndim);
-  strm->Write(tensor->dtype);
-  int ndim = tensor->ndim;
-  strm->WriteArray(tensor->shape, ndim);
-  int type_bytes = (tensor->dtype.bits + 7) / 8;
-  int64_t num_elems = 1;
-  for (int i = 0; i < ndim; ++i) {
-    num_elems *= tensor->shape[i];
-  }
-  int64_t data_byte_size = type_bytes * num_elems;
-  strm->Write(data_byte_size);
-
-  if (DMLC_IO_NO_ENDIAN_SWAP && tensor->device.device_type == kDLCPU &&
-      tensor->strides == nullptr && tensor->byte_offset == 0) {
-    // quick path
-    strm->Write(tensor->data, data_byte_size);
-  } else {
-    std::vector<uint8_t> bytes(data_byte_size);
-    ICHECK_EQ(
-        TVMArrayCopyToBytes(const_cast<DLTensor*>(tensor), dmlc::BeginPtr(bytes), data_byte_size),
-        0)
-        << TVMGetLastError();
-    if (!DMLC_IO_NO_ENDIAN_SWAP) {
-      dmlc::ByteSwap(dmlc::BeginPtr(bytes), type_bytes, num_elems);
-    }
-    strm->Write(dmlc::BeginPtr(bytes), data_byte_size);
-  }
-  return true;
-}
-
-inline void NDArray::Save(dmlc::Stream* strm) const { SaveDLTensor(strm, operator->()); }
-
-inline bool NDArray::Load(dmlc::Stream* strm) {
-  uint64_t header, reserved;
-  ICHECK(strm->Read(&header)) << "Invalid DLTensor file format";
-  ICHECK(strm->Read(&reserved)) << "Invalid DLTensor file format";
-  ICHECK(header == kTVMNDArrayMagic) << "Invalid DLTensor file format";
-  Device dev;
-  int ndim;
-  DLDataType dtype;
-  ICHECK(strm->Read(&dev)) << "Invalid DLTensor file format";
-  ICHECK(strm->Read(&ndim)) << "Invalid DLTensor file format";
-  ICHECK(strm->Read(&dtype)) << "Invalid DLTensor file format";
-  ICHECK_EQ(dev.device_type, kDLCPU) << "Invalid DLTensor device: can only save as CPU tensor";
-  std::vector<int64_t> shape(ndim);
-  if (ndim != 0) {
-    ICHECK(strm->ReadArray(&shape[0], ndim)) << "Invalid DLTensor file format";
-  }
-  NDArray ret = NDArray::Empty(ShapeTuple(shape), dtype, dev);
-  int64_t num_elems = 1;
-  int elem_bytes = (ret->dtype.bits + 7) / 8;
-  for (int i = 0; i < ret->ndim; ++i) {
-    num_elems *= ret->shape[i];
-  }
-  int64_t data_byte_size;
-  ICHECK(strm->Read(&data_byte_size)) << "Invalid DLTensor file format";
-  ICHECK(data_byte_size == num_elems * elem_bytes) << "Invalid DLTensor file format";
-  auto read_ret = strm->Read(ret->data, data_byte_size);
-  // Only check non-empty data
-  if (ndim > 0 && shape[0] != 0) {
-    ICHECK(read_ret) << "Invalid DLTensor file format";
-  }
-  if (!DMLC_IO_NO_ENDIAN_SWAP) {
-    dmlc::ByteSwap(ret->data, elem_bytes, num_elems);
-  }
-  *this = ret;
-  return true;
-}
 
 }  // namespace runtime
 }  // namespace tvm
